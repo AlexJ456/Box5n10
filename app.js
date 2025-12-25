@@ -26,6 +26,7 @@ document.addEventListener('DOMContentLoaded', () => {
         hasStarted: false
     };
 
+    const offlineNotification = document.getElementById('offline-notification');
     let wakeLock = null;
     let audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
@@ -77,11 +78,11 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!width || !height) return;
 
         const baseSize = Math.min(width, height);
-        const dotCount = Math.max(12, Math.floor(baseSize / 55));
+        const dotCount = Math.max(14, Math.floor(baseSize / 50));
         const palette = ['#f97316', '#fbbf24', '#38bdf8', '#22c55e', '#a855f7', '#f472b6'];
 
         for (let i = 0; i < dotCount; i++) {
-            const radius = baseSize * (0.035 + Math.random() * 0.035);
+            const radius = baseSize * (0.05 + Math.random() * 0.03);
             const color = palette[i % palette.length];
             const padding = radius + 16;
             let x, y;
@@ -130,18 +131,14 @@ document.addEventListener('DOMContentLoaded', () => {
         invalidateGradient();
         regenerateDots();
 
-        if (!state.isPlaying) {
-            drawScene();
-        }
+        drawScene();
     }
 
     window.addEventListener('resize', resizeCanvas, { passive: true });
 
     function updateMotionPreference(event) {
         state.prefersReducedMotion = event.matches;
-        if (!state.isPlaying) {
-            drawScene();
-        }
+        drawScene();
     }
 
     const motionQuery = typeof window.matchMedia === 'function'
@@ -240,6 +237,7 @@ document.addEventListener('DOMContentLoaded', () => {
             state.timeLimitReached = false;
             playTone(state.count);
             startInterval();
+            regenerateDots();
             requestWakeLock();
         } else {
             clearInterval(interval);
@@ -297,6 +295,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         playTone(state.count);
         startInterval();
+        regenerateDots();
         requestWakeLock();
         render();
     }
@@ -343,8 +342,10 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.setTransform(scale, 0, 0, scale, 0, 0);
 
         ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = 'black';
+        ctx.fillRect(0, 0, width, height);
 
-        if (state.isPlaying) {
+        if (!state.isPlaying) {
             ctx.restore();
             return;
         }
@@ -353,7 +354,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!cachedGradient || cachedGradientKey !== gradientKey) {
             cachedGradient = ctx.createLinearGradient(0, 0, width, height);
             cachedGradient.addColorStop(0, hexToRgba('#0f172a', 0.9));
-            cachedGradient.addColorStop(1, hexToRgba('#1f2937', 0.9));
+            cachedGradient.addColorStop(1, hexToRgba('#111827', 0.9));
             cachedGradientKey = gradientKey;
         }
         ctx.fillStyle = cachedGradient;
@@ -364,18 +365,28 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         backgroundDots.forEach((dot, index) => {
-            const glow = ctx.createRadialGradient(dot.x, dot.y, dot.radius * 0.3, dot.x, dot.y, dot.radius * 1.1);
-            glow.addColorStop(0, hexToRgba(dot.color, 0.5));
+            const glow = ctx.createRadialGradient(dot.x, dot.y, dot.radius * 0.25, dot.x, dot.y, dot.radius * 1.4);
+            glow.addColorStop(0, hexToRgba(dot.color, 0.65));
             glow.addColorStop(1, hexToRgba(dot.color, 0));
             ctx.beginPath();
             ctx.fillStyle = glow;
-            ctx.arc(dot.x, dot.y, dot.radius * 1.1, 0, Math.PI * 2);
+            ctx.arc(dot.x, dot.y, dot.radius * 1.4, 0, Math.PI * 2);
             ctx.fill();
+
+            const rim = ctx.createRadialGradient(dot.x, dot.y, 0, dot.x, dot.y, dot.radius * 1.05);
+            rim.addColorStop(0, hexToRgba('#ffffff', 0.12));
+            rim.addColorStop(0.6, hexToRgba(dot.color, 0.95));
+            rim.addColorStop(1, hexToRgba(dot.color, 0.2));
 
             const offset = (index % 2 === 0 ? 1 : -1) * Math.min(dot.radius * 0.08, 3);
             ctx.beginPath();
+            ctx.fillStyle = rim;
+            ctx.arc(dot.x + offset, dot.y + offset, dot.radius * 1.05, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.beginPath();
             ctx.fillStyle = dot.color;
-            ctx.arc(dot.x + offset, dot.y + offset, dot.radius, 0, Math.PI * 2);
+            ctx.arc(dot.x + offset * 0.5, dot.y + offset * 0.5, dot.radius * 0.7, 0, Math.PI * 2);
             ctx.fill();
         });
 
@@ -383,7 +394,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateCanvasVisibility() {
-        const shouldShow = !state.isPlaying;
+        const shouldShow = state.isPlaying;
         canvas.classList.toggle('is-visible', shouldShow);
     }
 
@@ -508,11 +519,18 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('preset-5min').addEventListener('click', () => startWithPreset(5));
             document.getElementById('preset-10min').addEventListener('click', () => startWithPreset(10));
         }
-        if (!state.isPlaying) {
-            drawScene();
-        }
+        drawScene();
     }
+
+    function updateOfflineNotice() {
+        if (!offlineNotification) return;
+        offlineNotification.style.display = navigator.onLine ? 'none' : 'block';
+    }
+
+    window.addEventListener('online', updateOfflineNotice);
+    window.addEventListener('offline', updateOfflineNotice);
 
     render();
     resizeCanvas();
+    updateOfflineNotice();
 });
