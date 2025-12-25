@@ -19,7 +19,6 @@ document.addEventListener('DOMContentLoaded', () => {
         sessionComplete: false,
         timeLimitReached: false,
         phaseTime: 4,
-        pulseStartTime: null,
         devicePixelRatio: Math.min(window.devicePixelRatio || 1, 1.75),
         viewportWidth: initialWidth,
         viewportHeight: initialHeight,
@@ -60,12 +59,48 @@ document.addEventListener('DOMContentLoaded', () => {
         return `rgba(${r}, ${g}, ${b}, ${alpha})`;
     }
 
+    const toneFrequencies = [432, 528, 396, 639];
+
+    let backgroundDots = [];
     let cachedGradient = null;
     let cachedGradientKey = '';
 
     function invalidateGradient() {
         cachedGradient = null;
         cachedGradientKey = '';
+    }
+
+    function regenerateDots() {
+        backgroundDots = [];
+        const width = state.viewportWidth;
+        const height = state.viewportHeight;
+        if (!width || !height) return;
+
+        const baseSize = Math.min(width, height);
+        const dotCount = Math.max(12, Math.floor(baseSize / 55));
+        const palette = ['#f97316', '#fbbf24', '#38bdf8', '#22c55e', '#a855f7', '#f472b6'];
+
+        for (let i = 0; i < dotCount; i++) {
+            const radius = baseSize * (0.035 + Math.random() * 0.035);
+            const color = palette[i % palette.length];
+            const padding = radius + 16;
+            let x, y;
+            let attempts = 0;
+            do {
+                x = padding + Math.random() * (width - padding * 2);
+                y = padding + Math.random() * (height - padding * 2);
+                attempts++;
+            } while (
+                attempts < 25 &&
+                backgroundDots.some(dot => {
+                    const dx = dot.x - x;
+                    const dy = dot.y - y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    return distance < dot.radius + radius + 10;
+                })
+            );
+            backgroundDots.push({ x, y, radius, color });
+        }
     }
 
     function resizeCanvas() {
@@ -93,9 +128,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         invalidateGradient();
+        regenerateDots();
 
         if (!state.isPlaying) {
-            drawScene({ progress: state.sessionComplete ? 1 : 0, showTrail: false, phase: state.count });
+            drawScene();
         }
     }
 
@@ -104,7 +140,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateMotionPreference(event) {
         state.prefersReducedMotion = event.matches;
         if (!state.isPlaying) {
-            drawScene({ progress: state.sessionComplete ? 1 : 0, showTrail: false, phase: state.count });
+            drawScene();
         }
     }
 
@@ -127,24 +163,40 @@ document.addEventListener('DOMContentLoaded', () => {
         return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     }
 
-    function playTone() {
-        if (state.soundEnabled && audioContext) {
-            try {
-                const oscillator = audioContext.createOscillator();
-                oscillator.type = 'sine';
-                oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
-                oscillator.connect(audioContext.destination);
-                oscillator.start();
-                oscillator.stop(audioContext.currentTime + 0.1);
-            } catch (e) {
-                console.error('Error playing tone:', e);
-            }
+    function playTone(phaseIndex = 0) {
+        if (!state.soundEnabled || !audioContext) return;
+        try {
+            const now = audioContext.currentTime;
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            const filter = audioContext.createBiquadFilter();
+
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(
+                toneFrequencies[phaseIndex % toneFrequencies.length] || 432,
+                now
+            );
+
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(1400, now);
+            filter.Q.value = 0.9;
+
+            gainNode.gain.setValueAtTime(0.0001, now);
+            gainNode.gain.exponentialRampToValueAtTime(0.22, now + 0.05);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
+
+            oscillator.connect(filter);
+            filter.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+
+            oscillator.start(now);
+            oscillator.stop(now + 0.55);
+        } catch (e) {
+            console.error('Error playing tone:', e);
         }
     }
 
     let interval;
-    let animationFrameId;
-    let lastStateUpdate;
 
     async function requestWakeLock() {
         if ('wakeLock' in navigator) {
@@ -186,14 +238,11 @@ document.addEventListener('DOMContentLoaded', () => {
             state.count = 0;
             state.sessionComplete = false;
             state.timeLimitReached = false;
-            state.pulseStartTime = performance.now();
-            playTone();
+            playTone(state.count);
             startInterval();
-            animate();
             requestWakeLock();
         } else {
             clearInterval(interval);
-            cancelAnimationFrame(animationFrameId);
             state.totalTime = 0;
             state.countdown = state.phaseTime;
             state.count = 0;
@@ -201,8 +250,7 @@ document.addEventListener('DOMContentLoaded', () => {
             state.timeLimitReached = false;
             state.hasStarted = false;
             invalidateGradient();
-            drawScene({ progress: 0, showTrail: false, phase: state.count });
-            state.pulseStartTime = null;
+            drawScene();
             releaseWakeLock();
         }
         render();
@@ -216,12 +264,10 @@ document.addEventListener('DOMContentLoaded', () => {
         state.sessionComplete = false;
         state.timeLimit = '';
         state.timeLimitReached = false;
-        state.pulseStartTime = null;
         state.hasStarted = false;
         clearInterval(interval);
-        cancelAnimationFrame(animationFrameId);
         invalidateGradient();
-        drawScene({ progress: 0, showTrail: false, phase: state.count });
+        drawScene();
         releaseWakeLock();
         render();
     }
@@ -243,23 +289,20 @@ document.addEventListener('DOMContentLoaded', () => {
         state.count = 0;
         state.sessionComplete = false;
         state.timeLimitReached = false;
-        state.pulseStartTime = performance.now();
         state.hasStarted = true;
         if (audioContext && audioContext.state === 'suspended') {
             audioContext.resume().then(() => {
                 console.log('AudioContext resumed');
             });
         }
-        playTone();
+        playTone(state.count);
         startInterval();
-        animate();
         requestWakeLock();
         render();
     }
 
     function startInterval() {
         clearInterval(interval);
-        lastStateUpdate = performance.now();
         interval = setInterval(() => {
             state.totalTime += 1;
             if (state.timeLimit && !state.timeLimitReached) {
@@ -270,26 +313,23 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (state.countdown === 1) {
                 state.count = (state.count + 1) % 4;
-                state.pulseStartTime = performance.now();
                 state.countdown = state.phaseTime;
-                playTone();
+                playTone(state.count);
                 if (state.count === 3 && state.timeLimitReached) {
                     state.sessionComplete = true;
                     state.isPlaying = false;
                     state.hasStarted = false;
                     clearInterval(interval);
-                    cancelAnimationFrame(animationFrameId);
                     releaseWakeLock();
                 }
             } else {
                 state.countdown -= 1;
             }
-            lastStateUpdate = performance.now();
             render();
         }, 1000);
     }
 
-    function drawScene({ progress = 0, phase = state.count, showTrail = state.isPlaying, timestamp = performance.now() } = {}) {
+    function drawScene() {
         if (!ctx) return;
 
         const width = state.viewportWidth || canvas.clientWidth || canvas.width;
@@ -304,132 +344,47 @@ document.addEventListener('DOMContentLoaded', () => {
 
         ctx.clearRect(0, 0, width, height);
 
-        if (!state.hasStarted && !state.sessionComplete) {
-            invalidateGradient();
+        if (state.isPlaying) {
             ctx.restore();
             return;
         }
 
-        const clampedProgress = Math.max(0, Math.min(1, progress));
-        const easedProgress = 0.5 - (Math.cos(Math.PI * clampedProgress) / 2);
-        const baseSize = Math.min(width, height) * 0.6;
-        const topMargin = 20;
-        const sizeWithoutBreath = Math.min(baseSize, height - topMargin * 2);
-        const verticalOffset = Math.min(height * 0.18, 110);
-        const preferredTop = height / 2 + verticalOffset - sizeWithoutBreath / 2;
-        const top = Math.max(topMargin, Math.min(preferredTop, height - sizeWithoutBreath - topMargin));
-        const left = (width - sizeWithoutBreath) / 2;
-
-        const now = timestamp;
-        const allowMotion = !state.prefersReducedMotion;
-        let breathInfluence = 0;
-        if (phase === 0) {
-            breathInfluence = easedProgress;
-        } else if (phase === 2) {
-            breathInfluence = 1 - easedProgress;
-        } else if (allowMotion) {
-            breathInfluence = 0.3 + 0.2 * (0.5 + 0.5 * Math.sin(now / 350));
-        } else {
-            breathInfluence = 0.3;
-        }
-
-        let pulseBoost = 0;
-        if (allowMotion && state.pulseStartTime !== null) {
-            const pulseElapsed = (now - state.pulseStartTime) / 1000;
-            if (pulseElapsed < 0.6) {
-                pulseBoost = Math.sin((pulseElapsed / 0.6) * Math.PI);
-            }
-        }
-
-        const size = sizeWithoutBreath * (1 + 0.08 * breathInfluence + 0.03 * pulseBoost);
-        const adjustedLeft = left + (sizeWithoutBreath - size) / 2;
-        const adjustedTop = top + (sizeWithoutBreath - size) / 2;
-        const points = [
-            { x: adjustedLeft, y: adjustedTop + size },
-            { x: adjustedLeft, y: adjustedTop },
-            { x: adjustedLeft + size, y: adjustedTop },
-            { x: adjustedLeft + size, y: adjustedTop + size }
-        ];
-        const startPoint = points[phase];
-        const endPoint = points[(phase + 1) % 4];
-        const currentX = startPoint.x + easedProgress * (endPoint.x - startPoint.x);
-        const currentY = startPoint.y + easedProgress * (endPoint.y - startPoint.y);
-
-        const accentColor = phaseColors[phase] || '#f97316';
-        const shouldShowTrail = allowMotion && showTrail;
-
-        const gradientKey = `${Math.round(size * 100)}-${accentColor}-${Math.round(adjustedLeft)}-${Math.round(adjustedTop)}`;
+        const gradientKey = `${Math.round(width)}-${Math.round(height)}`;
         if (!cachedGradient || cachedGradientKey !== gradientKey) {
-            cachedGradient = ctx.createRadialGradient(
-                adjustedLeft + size / 2,
-                adjustedTop + size / 2,
-                size * 0.2,
-                adjustedLeft + size / 2,
-                adjustedTop + size / 2,
-                size
-            );
-            cachedGradient.addColorStop(0, hexToRgba(accentColor, 0.18));
-            cachedGradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            cachedGradient = ctx.createLinearGradient(0, 0, width, height);
+            cachedGradient.addColorStop(0, hexToRgba('#0f172a', 0.9));
+            cachedGradient.addColorStop(1, hexToRgba('#1f2937', 0.9));
             cachedGradientKey = gradientKey;
         }
         ctx.fillStyle = cachedGradient;
         ctx.fillRect(0, 0, width, height);
 
-        ctx.strokeStyle = hexToRgba('#fcd34d', 0.25);
-        ctx.lineWidth = Math.max(2, size * 0.015);
-        ctx.lineJoin = 'round';
-        ctx.strokeRect(adjustedLeft, adjustedTop, size, size);
-
-        ctx.lineWidth = Math.max(4, size * 0.03);
-        ctx.strokeStyle = hexToRgba(accentColor, shouldShowTrail ? 0.8 : 0.45);
-        ctx.shadowColor = hexToRgba(accentColor, 0.5);
-        ctx.shadowBlur = shouldShowTrail ? 15 : 8;
-        ctx.beginPath();
-        ctx.moveTo(points[0].x, points[0].y);
-        for (let i = 1; i <= phase; i++) {
-            ctx.lineTo(points[i].x, points[i].y);
-        }
-        if (shouldShowTrail) {
-            ctx.lineTo(currentX, currentY);
-        }
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-
-        const baseRadius = Math.max(8, size * 0.04);
-        let radius = baseRadius * (1 + 0.35 * breathInfluence + 0.25 * pulseBoost);
-        if (allowMotion && (phase === 1 || phase === 3)) {
-            radius += baseRadius * 0.12 * (0.5 + 0.5 * Math.sin(now / 200));
+        if (!backgroundDots.length) {
+            regenerateDots();
         }
 
-        ctx.beginPath();
-        ctx.arc(currentX, currentY, radius * 1.8, 0, 2 * Math.PI);
-        ctx.fillStyle = hexToRgba(accentColor, 0.25);
-        ctx.fill();
+        backgroundDots.forEach((dot, index) => {
+            const glow = ctx.createRadialGradient(dot.x, dot.y, dot.radius * 0.3, dot.x, dot.y, dot.radius * 1.1);
+            glow.addColorStop(0, hexToRgba(dot.color, 0.5));
+            glow.addColorStop(1, hexToRgba(dot.color, 0));
+            ctx.beginPath();
+            ctx.fillStyle = glow;
+            ctx.arc(dot.x, dot.y, dot.radius * 1.1, 0, Math.PI * 2);
+            ctx.fill();
 
-        ctx.beginPath();
-        ctx.arc(currentX, currentY, radius, 0, 2 * Math.PI);
-        ctx.fillStyle = accentColor;
-        ctx.fill();
+            const offset = (index % 2 === 0 ? 1 : -1) * Math.min(dot.radius * 0.08, 3);
+            ctx.beginPath();
+            ctx.fillStyle = dot.color;
+            ctx.arc(dot.x + offset, dot.y + offset, dot.radius, 0, Math.PI * 2);
+            ctx.fill();
+        });
 
         ctx.restore();
     }
 
     function updateCanvasVisibility() {
-        const shouldShow = state.isPlaying || state.sessionComplete;
+        const shouldShow = !state.isPlaying;
         canvas.classList.toggle('is-visible', shouldShow);
-    }
-
-    function animate() {
-        if (!state.isPlaying) return;
-        const now = performance.now();
-        const elapsed = (now - lastStateUpdate) / 1000;
-        const effectiveCountdown = state.countdown - elapsed;
-        let progress = (state.phaseTime - effectiveCountdown) / state.phaseTime;
-        progress = Math.max(0, Math.min(1, progress));
-
-        drawScene({ progress, timestamp: now });
-
-        animationFrameId = requestAnimationFrame(animate);
     }
 
     function render() {
@@ -440,7 +395,6 @@ document.addEventListener('DOMContentLoaded', () => {
             html += `
                 <div class="timer">Total Time: ${formatTime(state.totalTime)}</div>
                 <div class="instruction">${getInstruction(state.count)}</div>
-                <div class="countdown">${state.countdown}</div>
             `;
             const phases = ['Inhale', 'Hold', 'Exhale', 'Wait'];
             html += `<div class="phase-tracker">`;
@@ -555,7 +509,7 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('preset-10min').addEventListener('click', () => startWithPreset(10));
         }
         if (!state.isPlaying) {
-            drawScene({ progress: state.sessionComplete ? 1 : 0, phase: state.count, showTrail: false });
+            drawScene();
         }
     }
 
