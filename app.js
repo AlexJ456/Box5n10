@@ -2,6 +2,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const app = document.getElementById('app-content');
     const canvas = document.getElementById('box-canvas');
     const ctx = canvas ? canvas.getContext('2d') : null;
+    const offlineNotification = document.getElementById('offline-notification');
     if (!app || !canvas || !ctx) {
         return;
     }
@@ -19,6 +20,7 @@ document.addEventListener('DOMContentLoaded', () => {
         sessionComplete: false,
         timeLimitReached: false,
         phaseTime: 4,
+        pulseStartTime: null,
         devicePixelRatio: Math.min(window.devicePixelRatio || 1, 1.75),
         viewportWidth: initialWidth,
         viewportHeight: initialHeight,
@@ -26,7 +28,6 @@ document.addEventListener('DOMContentLoaded', () => {
         hasStarted: false
     };
 
-    const offlineNotification = document.getElementById('offline-notification');
     let wakeLock = null;
     let audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
@@ -60,48 +61,12 @@ document.addEventListener('DOMContentLoaded', () => {
         return `rgba(${r}, ${g}, ${b}, ${alpha})`;
     }
 
-    const toneFrequencies = [432, 528, 396, 639];
-
-    let backgroundDots = [];
     let cachedGradient = null;
     let cachedGradientKey = '';
 
     function invalidateGradient() {
         cachedGradient = null;
         cachedGradientKey = '';
-    }
-
-    function regenerateDots() {
-        backgroundDots = [];
-        const width = state.viewportWidth;
-        const height = state.viewportHeight;
-        if (!width || !height) return;
-
-        const baseSize = Math.min(width, height);
-        const dotCount = Math.max(14, Math.floor(baseSize / 50));
-        const palette = ['#f97316', '#fbbf24', '#38bdf8', '#22c55e', '#a855f7', '#f472b6'];
-
-        for (let i = 0; i < dotCount; i++) {
-            const radius = baseSize * (0.05 + Math.random() * 0.03);
-            const color = palette[i % palette.length];
-            const padding = radius + 16;
-            let x, y;
-            let attempts = 0;
-            do {
-                x = padding + Math.random() * (width - padding * 2);
-                y = padding + Math.random() * (height - padding * 2);
-                attempts++;
-            } while (
-                attempts < 25 &&
-                backgroundDots.some(dot => {
-                    const dx = dot.x - x;
-                    const dy = dot.y - y;
-                    const distance = Math.sqrt(dx * dx + dy * dy);
-                    return distance < dot.radius + radius + 10;
-                })
-            );
-            backgroundDots.push({ x, y, radius, color });
-        }
     }
 
     function resizeCanvas() {
@@ -129,16 +94,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         invalidateGradient();
-        regenerateDots();
 
-        drawScene();
+        if (!state.isPlaying) {
+            drawScene({ progress: state.sessionComplete ? 1 : 0, phase: state.count });
+        }
     }
 
     window.addEventListener('resize', resizeCanvas, { passive: true });
 
     function updateMotionPreference(event) {
         state.prefersReducedMotion = event.matches;
-        drawScene();
+        if (!state.isPlaying) {
+            drawScene({ progress: state.sessionComplete ? 1 : 0, phase: state.count });
+        }
     }
 
     const motionQuery = typeof window.matchMedia === 'function'
@@ -154,46 +122,58 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function updateOfflineNotification() {
+        if (!offlineNotification) return;
+        const isOnline = navigator.onLine;
+        offlineNotification.style.display = isOnline ? 'none' : 'block';
+    }
+
+    window.addEventListener('online', updateOfflineNotification);
+    window.addEventListener('offline', updateOfflineNotification);
+
     function formatTime(seconds) {
         const mins = Math.floor(seconds / 60);
         const secs = seconds % 60;
         return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     }
 
-    function playTone(phaseIndex = 0) {
-        if (!state.soundEnabled || !audioContext) return;
-        try {
-            const now = audioContext.currentTime;
-            const oscillator = audioContext.createOscillator();
-            const gainNode = audioContext.createGain();
-            const filter = audioContext.createBiquadFilter();
+    function playTone() {
+        if (state.soundEnabled && audioContext) {
+            try {
+                const now = audioContext.currentTime;
+                const gain = audioContext.createGain();
+                gain.gain.setValueAtTime(0, now);
+                gain.gain.linearRampToValueAtTime(0.2, now + 0.03);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
 
-            oscillator.type = 'sine';
-            oscillator.frequency.setValueAtTime(
-                toneFrequencies[phaseIndex % toneFrequencies.length] || 432,
-                now
-            );
+                const primary = audioContext.createOscillator();
+                primary.type = 'sine';
+                primary.frequency.setValueAtTime(540, now);
+                primary.frequency.exponentialRampToValueAtTime(480, now + 0.4);
 
-            filter.type = 'lowpass';
-            filter.frequency.setValueAtTime(1400, now);
-            filter.Q.value = 0.9;
+                const harmonic = audioContext.createOscillator();
+                harmonic.type = 'triangle';
+                harmonic.frequency.setValueAtTime(810, now);
+                harmonic.frequency.exponentialRampToValueAtTime(720, now + 0.4);
+                harmonic.detune.setValueAtTime(6, now);
 
-            gainNode.gain.setValueAtTime(0.0001, now);
-            gainNode.gain.exponentialRampToValueAtTime(0.22, now + 0.05);
-            gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
+                primary.connect(gain);
+                harmonic.connect(gain);
+                gain.connect(audioContext.destination);
 
-            oscillator.connect(filter);
-            filter.connect(gainNode);
-            gainNode.connect(audioContext.destination);
-
-            oscillator.start(now);
-            oscillator.stop(now + 0.55);
-        } catch (e) {
-            console.error('Error playing tone:', e);
+                primary.start(now);
+                harmonic.start(now + 0.02);
+                harmonic.stop(now + 0.4);
+                primary.stop(now + 0.45);
+            } catch (e) {
+                console.error('Error playing tone:', e);
+            }
         }
     }
 
     let interval;
+    let animationFrameId;
+    let lastStateUpdate;
 
     async function requestWakeLock() {
         if ('wakeLock' in navigator) {
@@ -235,12 +215,14 @@ document.addEventListener('DOMContentLoaded', () => {
             state.count = 0;
             state.sessionComplete = false;
             state.timeLimitReached = false;
-            playTone(state.count);
+            state.pulseStartTime = performance.now();
+            playTone();
             startInterval();
-            regenerateDots();
+            animate();
             requestWakeLock();
         } else {
             clearInterval(interval);
+            cancelAnimationFrame(animationFrameId);
             state.totalTime = 0;
             state.countdown = state.phaseTime;
             state.count = 0;
@@ -248,7 +230,8 @@ document.addEventListener('DOMContentLoaded', () => {
             state.timeLimitReached = false;
             state.hasStarted = false;
             invalidateGradient();
-            drawScene();
+            drawScene({ progress: 0, phase: state.count });
+            state.pulseStartTime = null;
             releaseWakeLock();
         }
         render();
@@ -262,10 +245,12 @@ document.addEventListener('DOMContentLoaded', () => {
         state.sessionComplete = false;
         state.timeLimit = '';
         state.timeLimitReached = false;
+        state.pulseStartTime = null;
         state.hasStarted = false;
         clearInterval(interval);
+        cancelAnimationFrame(animationFrameId);
         invalidateGradient();
-        drawScene();
+        drawScene({ progress: 0, phase: state.count });
         releaseWakeLock();
         render();
     }
@@ -287,21 +272,23 @@ document.addEventListener('DOMContentLoaded', () => {
         state.count = 0;
         state.sessionComplete = false;
         state.timeLimitReached = false;
+        state.pulseStartTime = performance.now();
         state.hasStarted = true;
         if (audioContext && audioContext.state === 'suspended') {
             audioContext.resume().then(() => {
                 console.log('AudioContext resumed');
             });
         }
-        playTone(state.count);
+        playTone();
         startInterval();
-        regenerateDots();
+        animate();
         requestWakeLock();
         render();
     }
 
     function startInterval() {
         clearInterval(interval);
+        lastStateUpdate = performance.now();
         interval = setInterval(() => {
             state.totalTime += 1;
             if (state.timeLimit && !state.timeLimitReached) {
@@ -312,23 +299,26 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (state.countdown === 1) {
                 state.count = (state.count + 1) % 4;
+                state.pulseStartTime = performance.now();
                 state.countdown = state.phaseTime;
-                playTone(state.count);
+                playTone();
                 if (state.count === 3 && state.timeLimitReached) {
                     state.sessionComplete = true;
                     state.isPlaying = false;
                     state.hasStarted = false;
                     clearInterval(interval);
+                    cancelAnimationFrame(animationFrameId);
                     releaseWakeLock();
                 }
             } else {
                 state.countdown -= 1;
             }
+            lastStateUpdate = performance.now();
             render();
         }, 1000);
     }
 
-    function drawScene() {
+    function drawScene({ progress = 0, phase = state.count, timestamp = performance.now() } = {}) {
         if (!ctx) return;
 
         const width = state.viewportWidth || canvas.clientWidth || canvas.width;
@@ -342,60 +332,97 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.setTransform(scale, 0, 0, scale, 0, 0);
 
         ctx.clearRect(0, 0, width, height);
-        ctx.fillStyle = 'black';
-        ctx.fillRect(0, 0, width, height);
 
-        if (!state.isPlaying) {
+        if (!state.hasStarted && !state.sessionComplete) {
+            invalidateGradient();
             ctx.restore();
             return;
         }
 
-        const gradientKey = `${Math.round(width)}-${Math.round(height)}`;
+        const clampedProgress = Math.max(0, Math.min(1, progress));
+        const easedProgress = 0.5 - (Math.cos(Math.PI * clampedProgress) / 2);
+
+        const minDimension = Math.min(width, height);
+        const centerX = width / 2;
+        const centerY = height / 2;
+        const ringSize = minDimension * 0.5;
+        const baseRadius = Math.max(16, minDimension * 0.085);
+        const allowMotion = !state.prefersReducedMotion;
+        const now = timestamp;
+
+        const gradientKey = `${Math.round(minDimension)}-${phase}`;
         if (!cachedGradient || cachedGradientKey !== gradientKey) {
-            cachedGradient = ctx.createLinearGradient(0, 0, width, height);
-            cachedGradient.addColorStop(0, hexToRgba('#0f172a', 0.9));
-            cachedGradient.addColorStop(1, hexToRgba('#111827', 0.9));
+            cachedGradient = ctx.createRadialGradient(centerX, centerY, minDimension * 0.05, centerX, centerY, minDimension * 0.65);
+            cachedGradient.addColorStop(0, 'rgba(15, 23, 42, 0.35)');
+            cachedGradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
             cachedGradientKey = gradientKey;
         }
+
         ctx.fillStyle = cachedGradient;
         ctx.fillRect(0, 0, width, height);
 
-        if (!backgroundDots.length) {
-            regenerateDots();
-        }
+        const positions = [
+            { x: centerX - ringSize / 2, y: centerY - ringSize / 2 },
+            { x: centerX + ringSize / 2, y: centerY - ringSize / 2 },
+            { x: centerX + ringSize / 2, y: centerY + ringSize / 2 },
+            { x: centerX - ringSize / 2, y: centerY + ringSize / 2 }
+        ];
 
-        backgroundDots.forEach((dot, index) => {
-            const glow = ctx.createRadialGradient(dot.x, dot.y, dot.radius * 0.25, dot.x, dot.y, dot.radius * 1.4);
-            glow.addColorStop(0, hexToRgba(dot.color, 0.65));
-            glow.addColorStop(1, hexToRgba(dot.color, 0));
+        positions.forEach((pos, index) => {
+            const color = phaseColors[index] || '#fde68a';
+            const isActive = index === phase;
+            const pulse = allowMotion ? Math.sin((now / 400) + index) * 0.08 : 0;
+            const breathLift = isActive ? (0.35 * easedProgress) : 0;
+            const radius = baseRadius * (1 + breathLift + pulse * 0.4);
+
+            ctx.save();
+            ctx.shadowColor = hexToRgba(color, isActive ? 0.7 : 0.35);
+            ctx.shadowBlur = isActive ? baseRadius * 0.9 : baseRadius * 0.5;
+
+            const innerGradient = ctx.createRadialGradient(pos.x, pos.y, radius * 0.25, pos.x, pos.y, radius * 1.25);
+            innerGradient.addColorStop(0, hexToRgba(color, 0.9));
+            innerGradient.addColorStop(1, hexToRgba(color, 0.25));
+            ctx.fillStyle = innerGradient;
             ctx.beginPath();
-            ctx.fillStyle = glow;
-            ctx.arc(dot.x, dot.y, dot.radius * 1.4, 0, Math.PI * 2);
+            ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
             ctx.fill();
 
-            const rim = ctx.createRadialGradient(dot.x, dot.y, 0, dot.x, dot.y, dot.radius * 1.05);
-            rim.addColorStop(0, hexToRgba('#ffffff', 0.12));
-            rim.addColorStop(0.6, hexToRgba(dot.color, 0.95));
-            rim.addColorStop(1, hexToRgba(dot.color, 0.2));
+            ctx.lineWidth = Math.max(2, radius * 0.15);
+            ctx.strokeStyle = hexToRgba(color, isActive ? 0.9 : 0.5);
+            ctx.stroke();
 
-            const offset = (index % 2 === 0 ? 1 : -1) * Math.min(dot.radius * 0.08, 3);
-            ctx.beginPath();
-            ctx.fillStyle = rim;
-            ctx.arc(dot.x + offset, dot.y + offset, dot.radius * 1.05, 0, Math.PI * 2);
-            ctx.fill();
+            if (isActive) {
+                ctx.beginPath();
+                ctx.arc(pos.x, pos.y, radius + baseRadius * 0.45 * (0.6 + easedProgress), 0, Math.PI * 2);
+                ctx.strokeStyle = hexToRgba(color, 0.35);
+                ctx.lineWidth = Math.max(1.5, radius * 0.08);
+                ctx.setLineDash([6, 10]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
 
-            ctx.beginPath();
-            ctx.fillStyle = dot.color;
-            ctx.arc(dot.x + offset * 0.5, dot.y + offset * 0.5, dot.radius * 0.7, 0, Math.PI * 2);
-            ctx.fill();
+            ctx.restore();
         });
 
         ctx.restore();
     }
 
     function updateCanvasVisibility() {
-        const shouldShow = state.isPlaying;
+        const shouldShow = state.isPlaying || state.sessionComplete;
         canvas.classList.toggle('is-visible', shouldShow);
+    }
+
+    function animate() {
+        if (!state.isPlaying) return;
+        const now = performance.now();
+        const elapsed = (now - lastStateUpdate) / 1000;
+        const effectiveCountdown = state.countdown - elapsed;
+        let progress = (state.phaseTime - effectiveCountdown) / state.phaseTime;
+        progress = Math.max(0, Math.min(1, progress));
+
+        drawScene({ progress, timestamp: now });
+
+        animationFrameId = requestAnimationFrame(animate);
     }
 
     function render() {
@@ -519,18 +546,12 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('preset-5min').addEventListener('click', () => startWithPreset(5));
             document.getElementById('preset-10min').addEventListener('click', () => startWithPreset(10));
         }
-        drawScene();
+        if (!state.isPlaying) {
+            drawScene({ progress: state.sessionComplete ? 1 : 0, phase: state.count });
+        }
     }
 
-    function updateOfflineNotice() {
-        if (!offlineNotification) return;
-        offlineNotification.style.display = navigator.onLine ? 'none' : 'block';
-    }
-
-    window.addEventListener('online', updateOfflineNotice);
-    window.addEventListener('offline', updateOfflineNotice);
-
+    updateOfflineNotification();
     render();
     resizeCanvas();
-    updateOfflineNotice();
 });
